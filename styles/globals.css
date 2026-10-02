@@ -166,3 +166,20 @@ code {
   width: auto;
   margin-right: 8px;
 }
+
+.accordion > summary {
+  cursor: pointer;
+  font-weight: 600;
+  font-size: 18px;
+}
+.accordion[open] > summary {
+  margin-bottom: 16px;
+}
+select {
+  width: 100%;
+  border: 1px solid #c6cdd8;
+  border-radius: 5px;
+  padding: 10px;
+  background: white;
+  color: #18202c;
+}

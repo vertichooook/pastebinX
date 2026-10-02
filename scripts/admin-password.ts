@@ -1,7 +1,7 @@
 import bcrypt from "bcryptjs";
 import { eq } from "drizzle-orm";
 import { db, pool } from "../lib/db";
-import { users, sessions, auditLogs } from "../lib/schema";
+import { admins, sessions, auditLogs } from "../lib/schema";
 async function hidden(prompt: string) {
   if (!process.stdin.isTTY)
     throw new Error("An interactive terminal is required");
@@ -45,29 +45,25 @@ try {
     Buffer.byteLength(password) > 72
   )
     throw new Error("Passwords must match and be 12 characters to 72 bytes");
-  const username = process.env.ADMIN_USERNAME;
-  if (!username) throw new Error("ADMIN_USERNAME is required");
+
   const passwordHash = await bcrypt.hash(password, 12);
   await db.transaction(async (tx) => {
     const [admin] = await tx
       .select()
-      .from(users)
-      .where(eq(users.username, username))
+      .from(admins)
+
       .for("update");
-    if (!admin || admin.role !== "admin")
-      throw new Error("Administrator not found");
+    if (!admin) throw new Error("Administrator not found");
     await tx
-      .update(users)
+      .update(admins)
       .set({ passwordHash, updatedAt: new Date() })
-      .where(eq(users.id, admin.id));
-    await tx.delete(sessions).where(eq(sessions.userId, admin.id));
-    await tx
-      .insert(auditLogs)
-      .values({
-        adminId: admin.id,
-        action: "CHANGE_PASSWORD",
-        targetUserId: admin.id,
-      });
+      .where(eq(admins.id, admin.id));
+    await tx.delete(sessions).where(eq(sessions.adminId, admin.id));
+    await tx.insert(auditLogs).values({
+      adminId: admin.id,
+      action: "CHANGE_PASSWORD",
+      targetUserId: admin.id,
+    });
   });
   console.log("Administrator password updated; sessions revoked");
 } finally {

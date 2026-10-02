@@ -9,13 +9,7 @@ import {
   unique,
   index,
 } from "drizzle-orm/pg-core";
-export const users = pgTable("users", {
-  id: uuid().primaryKey().defaultRandom(),
-  username: varchar({ length: 64 }).notNull().unique(),
-  passwordHash: text("password_hash").notNull(),
-  role: varchar({ length: 8 }).notNull().default("user"),
-  isActive: boolean("is_active").notNull().default(true),
-  nextDefNumber: integer("next_def_number").notNull().default(1),
+const dates = () => ({
   createdAt: timestamp("created_at", { withTimezone: true })
     .notNull()
     .defaultNow(),
@@ -23,39 +17,58 @@ export const users = pgTable("users", {
     .notNull()
     .defaultNow(),
 });
-export const entries = pgTable(
-  "entries",
+export const admins = pgTable("admins", {
+  id: uuid().primaryKey().defaultRandom(),
+  singleton: boolean().notNull().default(true).unique(),
+  passwordHash: text("password_hash").notNull(),
+  ...dates(),
+});
+export const profiles = pgTable("profiles", {
+  id: uuid().primaryKey().defaultRandom(),
+  name: varchar({ length: 64 }).notNull().unique(),
+  isActive: boolean("is_active").notNull().default(true),
+  ...dates(),
+});
+export const functions = pgTable("functions", {
+  id: uuid().primaryKey().defaultRandom(),
+  defNumber: integer("def_number").notNull().unique(),
+  slug: varchar({ length: 32 }).notNull().unique(),
+  title: varchar({ length: 200 }).notNull(),
+  isActive: boolean("is_active").notNull().default(true),
+  ...dates(),
+});
+export const functionCounter = pgTable("function_counter", {
+  singleton: boolean().primaryKey().default(true),
+  nextNumber: integer("next_number").notNull().default(1),
+});
+export const variants = pgTable(
+  "variants",
   {
     id: uuid().primaryKey().defaultRandom(),
-    userId: uuid("user_id")
+    profileId: uuid("profile_id")
       .notNull()
-      .references(() => users.id, { onDelete: "cascade" }),
-    defNumber: integer("def_number").notNull(),
-    slug: varchar({ length: 32 }).notNull(),
-    title: varchar({ length: 200 }),
+      .references(() => profiles.id, { onDelete: "cascade" }),
+    functionId: uuid("function_id")
+      .notNull()
+      .references(() => functions.id, { onDelete: "cascade" }),
     content: text().notNull(),
     isActive: boolean("is_active").notNull().default(true),
-    createdAt: timestamp("created_at", { withTimezone: true })
-      .notNull()
-      .defaultNow(),
-    updatedAt: timestamp("updated_at", { withTimezone: true })
-      .notNull()
-      .defaultNow(),
     expiresAt: timestamp("expires_at", { withTimezone: true }),
+    ...dates(),
   },
-  (t) => [unique().on(t.userId, t.defNumber), unique().on(t.userId, t.slug)],
+  (t) => [unique().on(t.profileId, t.functionId), index().on(t.functionId)],
 );
 export const sessions = pgTable(
   "sessions",
   {
     tokenHash: text("token_hash").primaryKey(),
-    userId: uuid("user_id")
+    adminId: uuid("admin_id")
       .notNull()
-      .references(() => users.id, { onDelete: "cascade" }),
+      .references(() => admins.id, { onDelete: "cascade" }),
     csrfToken: text("csrf_token").notNull(),
     expiresAt: timestamp("expires_at", { withTimezone: true }).notNull(),
   },
-  (t) => [index().on(t.userId)],
+  (t) => [index().on(t.adminId)],
 );
 export const auditLogs = pgTable("audit_logs", {
   id: uuid().primaryKey().defaultRandom(),
@@ -63,6 +76,7 @@ export const auditLogs = pgTable("audit_logs", {
   action: varchar({ length: 32 }).notNull(),
   targetUserId: uuid("target_user_id"),
   targetEntryId: uuid("target_entry_id"),
+  targetFunctionId: uuid("target_function_id"),
   createdAt: timestamp("created_at", { withTimezone: true })
     .notNull()
     .defaultNow(),

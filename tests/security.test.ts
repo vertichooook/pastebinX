@@ -1,7 +1,7 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import { spawn, execFile } from "node:child_process";
-import { mkdir, mkdtemp } from "node:fs/promises";
+import { mkdir, mkdtemp, readFile } from "node:fs/promises";
 import { promisify } from "node:util";
 import { join } from "node:path";
 import { once } from "node:events";
@@ -61,10 +61,9 @@ class Browser {
     this.save(response);
     return { response, body: await response.json() };
   }
-  async login(username: string, password: string, destination: string) {
+  async login(password: string, destination: string) {
     await this.page(destination);
     const result = await this.action("login", {
-      username,
       password,
       destination,
     });
@@ -74,14 +73,15 @@ class Browser {
   }
 }
 test(
-  "PostgreSQL + production HTTP security and lifecycle",
+  "Function variants, migration and public accordion",
   { timeout: 180000 },
   async (t) => {
     await mkdir("work", { recursive: true });
-    const directory = await mkdtemp(join(process.cwd(), "work", "paste-test-"));
+    const directory = await mkdtemp(
+      join(process.cwd(), "work", "variants-test-"),
+    );
     const useWasm = process.env.PASTE_TEST_PGLITE === "true";
-    let wasm: PGlite | undefined;
-    let socket: PGLiteSocketServer | undefined;
+    let wasm: PGlite | undefined, socket: PGLiteSocketServer | undefined;
     const pg = useWasm
       ? {
           async initialise() {
@@ -111,9 +111,9 @@ test(
           onLog: () => {},
           onError: () => {},
         });
-    let server: ReturnType<typeof spawn> | undefined;
-    let pool: Pool | undefined;
-    let serverOutput = "";
+    let server: ReturnType<typeof spawn> | undefined,
+      pool: Pool | undefined,
+      output = "";
     try {
       await pg.initialise();
       await pg.start();
@@ -122,55 +122,97 @@ test(
         ? "postgresql://postgres:postgres@127.0.0.1:5497/postgres"
         : "postgresql://paste:testing-only-password@127.0.0.1:5497/paste_test";
       pool = new Pool({ connectionString: databaseUrl });
-      const scriptEnv: NodeJS.ProcessEnv = {
+      const env: NodeJS.ProcessEnv = {
         ...process.env,
         NODE_ENV: "production",
         DATABASE_URL: databaseUrl,
         APP_URL: origin,
         ADMIN_PATH: "control-test",
         SESSION_SECRET: "test-secret-".repeat(5),
-        ADMIN_USERNAME: "testadmin",
         ADMIN_PASSWORD: "admin-password-123",
       };
       const runScript = (script: string) =>
-        executeFile(process.execPath, ["--import", "tsx", script], {
-          env: scriptEnv,
-        });
+        executeFile(process.execPath, ["--import", "tsx", script], { env });
+      const bcrypt = (await import("bcryptjs")).default;
+      let alice = "",
+        bob = "";
       await t.test(
-        "migration and seed scripts are idempotent and never reset passwords",
+        "legacy data migrates to global functions and preserves variants, flags and admin password",
         async () => {
-          await runScript("scripts/migrate.ts");
-          await runScript("scripts/seed.ts");
-          const before = (
+          await pool!.query(
+            await readFile("migrations/0001_initial.sql", "utf8"),
+          );
+          await pool!.query(
+            "CREATE TABLE schema_migrations(name text PRIMARY KEY,applied_at timestamptz NOT NULL DEFAULT now())",
+          );
+          await pool!.query(
+            "INSERT INTO schema_migrations(name) VALUES('0001_initial.sql')",
+          );
+          await pool!.query(
+            "INSERT INTO users(username,password_hash,role) VALUES('legacy-admin',$1,'admin')",
+            [await bcrypt.hash("admin-password-123", 12)],
+          );
+          alice = (
             await pool!.query(
-              "SELECT password_hash FROM users WHERE username='testadmin'",
+              "INSERT INTO users(username,password_hash,next_def_number) VALUES('Alice','deleted-password-hash',6) RETURNING id",
             )
-          ).rows[0].password_hash;
+          ).rows[0].id;
+          bob = (
+            await pool!.query(
+              "INSERT INTO users(username,password_hash,next_def_number) VALUES('Bob','deleted-password-hash',3) RETURNING id",
+            )
+          ).rows[0].id;
+          for (const [owner, n, code] of [
+            [alice, 1, "alice-one"],
+            [bob, 1, "bob-one"],
+            [alice, 2, "alice-two"],
+          ] as const)
+            await pool!.query(
+              "INSERT INTO entries(user_id,def_number,slug,title,content) VALUES($1,$2,$3,$4,$5)",
+              [owner, n, `def${n}`, `Function ${n}`, code],
+            );
+          await pool!.query(
+            "INSERT INTO sessions(token_hash,user_id,csrf_token,expires_at) VALUES($1,$2,$3,now()+interval '1 day')",
+            ["obsolete", alice, "obsolete"],
+          );
           await runScript("scripts/migrate.ts");
           await runScript("scripts/seed.ts");
           assert.equal(
-            (
-              await pool!.query(
-                "SELECT password_hash FROM users WHERE username='testadmin'",
-              )
-            ).rows[0].password_hash,
-            before,
+            (await pool!.query("SELECT count(*)::int AS n FROM functions"))
+              .rows[0].n,
+            2,
           );
           assert.equal(
-            (
-              await pool!.query(
-                "SELECT count(*)::int AS count FROM schema_migrations",
-              )
-            ).rows[0].count,
-            1,
+            (await pool!.query("SELECT count(*)::int AS n FROM variants"))
+              .rows[0].n,
+            3,
+          );
+          assert.equal(
+            (await pool!.query("SELECT count(*)::int AS n FROM sessions"))
+              .rows[0].n,
+            0,
+          );
+          assert.equal(
+            (await pool!.query("SELECT to_regclass('users') AS old")).rows[0]
+              .old,
+            null,
+          );
+          assert.equal(
+            (await pool!.query("SELECT next_number FROM function_counter"))
+              .rows[0].next_number,
+            6,
+          );
+          const before = (await pool!.query("SELECT password_hash FROM admins"))
+            .rows[0].password_hash;
+          await runScript("scripts/migrate.ts");
+          await runScript("scripts/seed.ts");
+          assert.equal(
+            (await pool!.query("SELECT password_hash FROM admins")).rows[0]
+              .password_hash,
+            before,
           );
         },
       );
-      const adminId = (
-        await pool.query("SELECT id FROM users WHERE username=$1", [
-          "testadmin",
-        ])
-      ).rows[0].id;
       server = spawn(
         process.execPath,
         [
@@ -181,290 +223,254 @@ test(
           "-p",
           "3197",
         ],
-        {
-          env: {
-            ...process.env,
-            NODE_ENV: "production",
-            DATABASE_URL: databaseUrl,
-            APP_URL: origin,
-            ADMIN_PATH: "control-test",
-            SESSION_SECRET: "test-secret-".repeat(5),
-            NEXT_TELEMETRY_DISABLED: "1",
-          },
-          stdio: ["ignore", "pipe", "pipe"],
-        },
+        { env, stdio: ["ignore", "pipe", "pipe"] },
       );
-      server.stdout?.on("data", (d) => (serverOutput += String(d)));
-      server.stderr?.on("data", (d) => (serverOutput += String(d)));
+      server.stdout?.on("data", (d) => (output += String(d)));
+      server.stderr?.on("data", (d) => (output += String(d)));
       const deadline = Date.now() + 60000;
       while (true) {
         try {
           await fetch(base);
           break;
         } catch {
-          if (server.exitCode !== null) throw new Error(serverOutput);
-          if (Date.now() > deadline)
-            throw new Error("Server readiness timed out: " + serverOutput);
+          if (server.exitCode !== null || Date.now() > deadline)
+            throw new Error(output);
           await new Promise((r) => setTimeout(r, 200));
         }
       }
-      const admin = new Browser(),
-        one = new Browser(),
-        two = new Browser();
-      let user1 = "",
-        user2 = "";
-      await t.test("public root and invalid paths are real 404", async () => {
-        for (const path of [
-          "/",
-          "/abc",
-          "/hello",
-          "/login",
-          "/admin",
-          "/def0",
-          "/def01",
-          "/def2147483648",
-        ]) {
-          const r = await fetch(base + path);
-          assert.equal(r.status, 404, path);
-          assert.match(await r.text(), /404 Not Found/);
-        }
-      });
-      await admin.login("testadmin", "admin-password-123", "/control-test");
-      await admin.page("/control-test");
+      const publicBrowser = new Browser(),
+        admin = new Browser();
+      let functionId = "",
+        newProfile = "",
+        variantId = "";
       await t.test(
-        "admin creates users and independently numbered entries",
+        "public pages require no login and omit users without this function",
         async () => {
-          for (const username of ["user1", "user2"])
-            assert.equal(
-              (
-                await admin.action("createUser", {
-                  username,
-                  password: "user-password-123",
-                })
-              ).response.status,
-              200,
-            );
-          const rows = (
-            await pool!.query("SELECT id,username FROM users WHERE role='user'")
-          ).rows;
-          user1 = rows.find((r) => r.username === "user1").id;
-          user2 = rows.find((r) => r.username === "user2").id;
-          for (const [owner, count] of [
-            [user1, 5],
-            [user2, 2],
-          ] as const) {
-            for (let n = 1; n <= count; n++) {
-              const result = await admin.action("createEntry", {
-                userId: owner,
-                title: `Text ${n}`,
-                content: `${owner === user1 ? "ONE" : "TWO"}-${n}`,
-                expiresAt: null,
-              });
-              assert.equal(result.response.status, 200);
-              assert.equal(result.body.url, `${origin}/def${n}`);
-            }
-          }
+          const first = await publicBrowser.page("/def1");
+          assert.equal(first.response.status, 200);
+          assert.equal(first.props.mode, "public");
+          assert.match(first.text, /<details/);
+          assert.match(first.text, /alice-one/);
+          assert.match(first.text, /bob-one/);
+          assert.equal(publicBrowser.cookies.size, 0);
+          const second = await publicBrowser.page("/def2");
+          assert.match(second.text, /Alice/);
+          assert.ok(!second.text.includes("Bob"));
+          assert.ok(!second.text.includes("Sign In"));
+          const api = await publicBrowser.get("/api/entry/def2?user_id=" + bob);
+          assert.equal(api.status, 200);
+          assert.deepEqual(
+            (await api.json()).variants.map((v: { name: string }) => v.name),
+            ["Alice"],
+          );
+          for (const path of [
+            "/",
+            "/admin",
+            "/login",
+            "/abc",
+            "/def0",
+            "/def01",
+            "/def999",
+          ])
+            assert.equal((await publicBrowser.get(path)).status, 404, path);
         },
       );
       await t.test(
-        "login keeps requested slug; same URL resolves only session owner",
+        "only the shared admin password grants mutation access",
         async () => {
-          await one.login("user1", "user-password-123", "/def5");
-          assert.match((await one.page("/def5")).text, /ONE-5/);
-          await two.login("user2", "user-password-123", "/def5");
-          assert.equal((await two.get("/def5")).status, 404);
-          assert.match((await two.page("/def2")).text, /TWO-2/);
-          assert.match((await one.page("/def2")).text, /ONE-2/);
           assert.equal(
-            (await two.get(`/api/entry/def5?user_id=${user1}`)).status,
-            404,
+            (await publicBrowser.action("createProfile", { name: "Attack" }))
+              .response.status,
+            401,
           );
-          const result = await two.get(`/api/entry/def2?user_id=${user1}`);
-          assert.equal((await result.json()).content, "TWO-2");
-        },
-      );
-      await t.test(
-        "CSRF, origin and RBAC block direct mutation attempts",
-        async () => {
-          await two.page("/def2");
+          await admin.login("admin-password-123", "/control-test");
+          await admin.page("/control-test");
           assert.equal(
-            (
-              await two.action("createEntry", {
-                userId: user1,
-                title: "attack",
-                content: "attack",
-                expiresAt: null,
-              })
-            ).response.status,
-            404,
-          );
-          assert.equal(
-            (
-              await admin.action(
-                "createUser",
-                { username: "attacker", password: "password-password" },
-                "bad",
-              )
-            ).response.status,
+            (await admin.action("createProfile", { name: "Attack" }, "bad"))
+              .response.status,
             403,
           );
           assert.equal(
             (
               await admin.action(
-                "createUser",
-                { username: "attacker", password: "password-password" },
+                "createProfile",
+                { name: "Attack" },
                 admin.csrf,
                 "https://evil.example",
               )
             ).response.status,
             403,
           );
-          assert.equal((await two.get("/control-test")).status, 404);
-          const anon = new Browser();
           assert.equal(
-            (
-              await anon.action(
-                "login",
-                {
-                  username: "user1",
-                  password: "user-password-123",
-                  destination: "/def5",
-                },
-                "bad",
-              )
-            ).response.status,
-            403,
+            (await admin.get("/control-test/functions/" + "a".repeat(36)))
+              .status,
+            404,
           );
         },
       );
       await t.test(
-        "concurrent creation is unique and deletion never reuses a number",
+        "functions and author variants can be created, edited and renamed",
         async () => {
-          const result = await Promise.all(
-            Array.from({ length: 10 }, () =>
-              admin.action("createEntry", {
-                userId: user2,
-                title: "Concurrent",
-                content: "parallel",
-                expiresAt: null,
-              }),
-            ),
+          assert.equal(
+            (await admin.action("createProfile", { name: "Иван" })).response
+              .status,
+            200,
           );
-          assert.ok(result.every((r) => r.response.status === 200));
-          assert.equal(new Set(result.map((r) => r.body.url)).size, 10);
-          const item = (
-            await pool!.query(
-              "SELECT id FROM entries WHERE user_id=$1 AND slug='def3'",
-              [user2],
-            )
-          ).rows[0];
+          newProfile = (
+            await pool!.query("SELECT id FROM profiles WHERE name='Иван'")
+          ).rows[0].id;
+          const made = await admin.action("createFunction", {
+            title: "Shared function",
+          });
+          assert.equal(made.response.status, 200);
+          functionId = made.body.redirect.split("/").pop();
           assert.equal(
             (
-              await admin.action("deleteEntry", {
-                userId: user2,
-                entryId: item.id,
+              await pool!.query("SELECT slug FROM functions WHERE id=$1", [
+                functionId,
+              ])
+            ).rows[0].slug,
+            "def6",
+          );
+          assert.equal(
+            (
+              await admin.action("saveVariant", {
+                functionId,
+                profileId: newProfile,
+                content: "<script>alert(1)</script>",
+                expiresAt: null,
               })
             ).response.status,
             200,
           );
-          const next = await admin.action("createEntry", {
-            userId: user2,
-            title: "next",
-            content: "next",
+          variantId = (
+            await pool!.query("SELECT id FROM variants WHERE function_id=$1", [
+              functionId,
+            ])
+          ).rows[0].id;
+          const page = await publicBrowser.page("/def6");
+          assert.match(page.text, /&lt;script&gt;/);
+          assert.ok(!page.text.includes("<script>alert(1)</script>"));
+          assert.equal(page.props.publicFn.variants.length, 1);
+          await admin.action("saveVariant", {
+            functionId,
+            profileId: newProfile,
+            content: "edited-code",
             expiresAt: null,
           });
-          assert.equal(next.body.url, `${origin}/def13`);
-          assert.equal((await two.get("/def3")).status, 404);
+          await admin.action("renameProfile", {
+            profileId: newProfile,
+            name: "New name",
+          });
+          assert.equal(
+            (
+              await pool!.query(
+                "SELECT count(*)::int AS n FROM variants WHERE function_id=$1",
+                [functionId],
+              )
+            ).rows[0].n,
+            1,
+          );
+          const api = await publicBrowser.get("/api/entry/def6");
+          const data = await api.json();
+          assert.equal(data.variants[0].name, "New name");
+          assert.equal(data.variants[0].content, "edited-code");
         },
       );
       await t.test(
-        "disabled, expired and missing entries are indistinguishable; content escapes HTML",
+        "hidden authors, disabled and expired variants never reach public HTML or API",
         async () => {
-          const item = (
-            await pool!.query(
-              "SELECT id FROM entries WHERE user_id=$1 AND slug='def5'",
-              [user1],
-            )
-          ).rows[0];
-          await admin.action("toggleEntry", {
-            userId: user1,
-            entryId: item.id,
-          });
-          assert.equal((await one.get("/def5")).status, 404);
-          await admin.action("toggleEntry", {
-            userId: user1,
-            entryId: item.id,
-          });
-          const content = '<script>alert("secret")</script>';
-          await admin.action("updateEntry", {
-            userId: user1,
-            entryId: item.id,
-            title: "Escaped",
-            content,
-            expiresAt: null,
-          });
-          const page = await one.page("/def5");
-          assert.ok(page.text.includes("&lt;script&gt;"));
-          assert.ok(!page.text.includes(content));
-          await admin.action("updateEntry", {
-            userId: user1,
-            entryId: item.id,
-            title: "Expired",
-            content: "expired-secret",
+          await admin.action("toggleProfile", { profileId: newProfile });
+          assert.equal(
+            (await (await publicBrowser.get("/api/entry/def6")).json()).variants
+              .length,
+            0,
+          );
+          await admin.action("toggleProfile", { profileId: newProfile });
+          await admin.action("toggleVariant", { variantId });
+          assert.equal(
+            (await (await publicBrowser.get("/api/entry/def6")).json()).variants
+              .length,
+            0,
+          );
+          await admin.action("toggleVariant", { variantId });
+          await admin.action("saveVariant", {
+            functionId,
+            profileId: newProfile,
+            content: "expired-code",
             expiresAt: "2020-01-01T00:00:00.000Z",
           });
-          assert.equal((await one.get("/def5")).status, 404);
-          assert.equal((await one.get("/def999")).status, 404);
+          const page = await publicBrowser.page("/def6");
+          assert.ok(!page.text.includes("expired-code"));
+          assert.ok(!page.text.includes("New name"));
+          await admin.action("toggleFunction", { functionId });
+          assert.equal((await publicBrowser.get("/def6")).status, 404);
+          assert.equal(
+            (await publicBrowser.get("/api/entry/def6")).status,
+            404,
+          );
+          await admin.action("toggleFunction", { functionId });
+        },
+      );
+      await t.test(
+        "global numbering is safe under concurrent creation and deleted numbers stay unused",
+        async () => {
+          const results = await Promise.all(
+            Array.from({ length: 10 }, () =>
+              admin.action("createFunction", { title: "Concurrent" }),
+            ),
+          );
+          assert.ok(results.every((r) => r.response.status === 200));
+          assert.equal(new Set(results.map((r) => r.body.redirect)).size, 10);
+          const f = (
+            await pool!.query("SELECT id FROM functions WHERE slug='def7'")
+          ).rows[0];
+          await admin.action("deleteFunction", { functionId: f.id });
+          const next = await admin.action("createFunction", {
+            title: "After deletion",
+          });
+          const nextId = next.body.redirect.split("/").pop();
           assert.equal(
             (
-              await admin.action("deleteEntry", {
-                userId: user2,
-                entryId: item.id,
-              })
-            ).response.status,
-            400,
+              await pool!.query("SELECT slug FROM functions WHERE id=$1", [
+                nextId,
+              ])
+            ).rows[0].slug,
+            "def17",
           );
         },
       );
       await t.test(
-        "password changes and blocking revoke sessions immediately",
+        "deleting a user removes their variants but leaves other users visible",
         async () => {
+          await admin.action("deleteProfile", { profileId: bob });
+          const first = await publicBrowser.page("/def1");
+          assert.match(first.text, /alice-one/);
+          assert.ok(!first.text.includes("Bob"));
+          assert.ok(!first.text.includes("bob-one"));
+          await admin.action("deleteVariant", { variantId });
           assert.equal(
             (
-              await admin.action("changePassword", {
-                userId: user1,
-                password: "new-password-123",
-              })
-            ).response.status,
-            200,
+              await pool!.query(
+                "SELECT count(*)::int AS n FROM variants WHERE id=$1",
+                [variantId],
+              )
+            ).rows[0].n,
+            0,
           );
-          assert.equal((await one.get("/api/entry/def2")).status, 401);
-          const relogin = new Browser();
-          await relogin.login("user1", "new-password-123", "/def2");
-          await admin.action("toggleUser", { userId: user1 });
-          assert.equal((await relogin.get("/api/entry/def2")).status, 401);
-          const failed = new Browser();
-          await failed.page("/def2");
-          assert.equal(
-            (
-              await failed.action("login", {
-                username: "user1",
-                password: "new-password-123",
-                destination: "/def2",
-              })
-            ).response.status,
-            401,
-          );
+          const audit = (await pool!.query("SELECT * FROM audit_logs")).rows;
+          assert.ok(audit.some((a) => a.action === "SAVE_VARIANT"));
+          assert.ok(audit.some((a) => a.action === "DELETE_PROFILE"));
+          assert.ok(!JSON.stringify(audit).includes("edited-code"));
         },
       );
       await t.test(
-        "logout destroys session and cookies have production flags",
+        "logout revokes admin access; brute-force protection remains",
         async () => {
-          await two.page("/def2");
-          const result = await two.action("logout");
-          assert.equal(result.response.status, 200);
+          const logout = await admin.action("logout");
+          assert.equal(logout.response.status, 200);
           assert.ok(
-            result.response.headers
+            logout.response.headers
               .getSetCookie()
               .some(
                 (c) =>
@@ -473,29 +479,18 @@ test(
                   c.includes("SameSite=Strict"),
               ),
           );
-          assert.equal((await two.get("/api/entry/def2")).status, 401);
-        },
-      );
-      await t.test(
-        "brute-force limit persists in PostgreSQL and audits contain metadata only",
-        async () => {
+          assert.equal(
+            (await admin.action("createProfile", { name: "Attack" })).response
+              .status,
+            401,
+          );
           const failed = new Browser();
-          await failed.page("/def1");
+          await failed.page("/control-test");
           let status = 0;
           for (let n = 0; n < 11; n++)
-            status = (
-              await failed.action("login", {
-                username: "missing-user",
-                password: "incorrect",
-                destination: "/def1",
-              })
-            ).response.status;
+            status = (await failed.action("login", { password: "incorrect" }))
+              .response.status;
           assert.equal(status, 429);
-          const audit = (await pool!.query("SELECT * FROM audit_logs")).rows;
-          assert.ok(audit.some((r) => r.action === "CREATE_ENTRY"));
-          assert.ok(audit.some((r) => r.action === "CHANGE_PASSWORD"));
-          assert.ok(audit.every((r) => r.admin_id === adminId));
-          assert.ok(!JSON.stringify(audit).includes("password-123"));
         },
       );
     } finally {

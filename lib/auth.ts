@@ -7,7 +7,7 @@ import {
 import type { IncomingMessage, ServerResponse } from "node:http";
 import { and, eq, gt } from "drizzle-orm";
 import { db } from "./db";
-import { sessions, users } from "./schema";
+import { sessions, admins } from "./schema";
 import { config } from "./config";
 export const hash = (value: string) =>
   createHash("sha256").update(value).digest("hex");
@@ -43,14 +43,13 @@ export async function currentSession(req: IncomingMessage) {
   const value = cookies(req).session;
   if (!value || !/^[a-f0-9]{64}$/.test(value)) return null;
   const [row] = await db
-    .select({ user: users, session: sessions })
+    .select({ admin: admins, session: sessions })
     .from(sessions)
-    .innerJoin(users, eq(sessions.userId, users.id))
+    .innerJoin(admins, eq(sessions.adminId, admins.id))
     .where(
       and(
         eq(sessions.tokenHash, hash(value)),
         gt(sessions.expiresAt, new Date()),
-        eq(users.isActive, true),
       ),
     );
   return row ?? null;
@@ -80,16 +79,14 @@ export function verifyAnonymousCsrf(
     equal(parts[2], sign(`${parts[0]}.${parts[1]}`))
   );
 }
-export async function createSession(userId: string, res: ServerResponse) {
+export async function createSession(adminId: string, res: ServerResponse) {
   const value = token();
-  await db
-    .insert(sessions)
-    .values({
-      tokenHash: hash(value),
-      userId,
-      csrfToken: token(),
-      expiresAt: new Date(Date.now() + 8 * 3600000),
-    });
+  await db.insert(sessions).values({
+    tokenHash: hash(value),
+    adminId,
+    csrfToken: token(),
+    expiresAt: new Date(Date.now() + 8 * 3600000),
+  });
   setCookie(res, "session", value, 8 * 3600);
   setCookie(res, "csrf", "", 0);
 }

@@ -31,7 +31,7 @@ jobs:
             docker compose logs --tail=80 app
             exit 1
           fi
-          docker compose exec -T app node -e "fetch('http://127.0.0.1:3000/def1').then(async r=>{if(r.status!==200 || !(await r.text()).includes('Sign In')) process.exit(1)}).catch(()=>process.exit(1))"
+          docker compose exec -T app node -e "fetch('http://127.0.0.1:3000/'+process.env.ADMIN_PATH).then(async r=>{if(r.status!==200 || !(await r.text()).includes('Sign In')) process.exit(1)}).catch(()=>process.exit(1))"
       - name: Stop containers
         if: always()
         run: |

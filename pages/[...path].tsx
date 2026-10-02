@@ -4,125 +4,77 @@ import Link from "next/link";
 import { useState, type FormEvent } from "react";
 import { eq, desc } from "drizzle-orm";
 import { db } from "../lib/db";
-import { users, entries, auditLogs } from "../lib/schema";
+import { profiles, functions, variants, auditLogs } from "../lib/schema";
 import { currentSession, anonymousCsrf } from "../lib/auth";
 import { config, validSlug, validUuid } from "../lib/config";
-import { ownedEntry } from "../lib/entries";
-type User = {
+import { publicFunction } from "../lib/entries";
+type Profile = { id: string; name: string; isActive: boolean };
+type Fn = { id: string; slug: string; title: string; isActive: boolean };
+type Variant = {
   id: string;
-  username: string;
+  profileId: string;
+  content: string;
   isActive: boolean;
-  createdAt: string;
-};
-type Entry = {
-  id: string;
-  slug: string;
-  title: string | null;
-  content?: string;
-  isActive: boolean;
-  createdAt: string;
   expiresAt: string | null;
+  updatedAt: string;
 };
-type Audit = {
-  id: string;
-  action: string;
-  adminId: string | null;
-  targetUserId: string | null;
-  targetEntryId: string | null;
-  createdAt: string;
+type PublicFn = {
+  slug: string;
+  title: string;
+  variants: { id: string; name: string; content: string; updatedAt: string }[];
 };
 type Props = {
-  mode: "login" | "entry" | "users" | "user" | "edit" | "audit";
-  csrf: string;
-  destination: string;
+  mode: "public" | "login" | "dashboard" | "function" | "audit";
+  csrf?: string;
   adminPath?: string;
   origin?: string;
-  username?: string;
-  entry?: Entry;
-  user?: User;
-  users?: User[];
-  entries?: Entry[];
-  audit?: Audit[];
-  created?: string;
+  publicFn?: PublicFn;
+  functions?: Fn[];
+  fn?: Fn;
+  profiles?: Profile[];
+  variants?: Variant[];
+  audit?: {
+    id: string;
+    action: string;
+    targetUserId: string | null;
+    targetFunctionId: string | null;
+    createdAt: string;
+  }[];
 };
 const serial = <T,>(value: unknown): T => JSON.parse(JSON.stringify(value));
 export const getServerSideProps: GetServerSideProps<Props> = async (ctx) => {
-  ctx.res.setHeader("Cache-Control", "private, no-store, max-age=0");
-  ctx.res.setHeader("Vary", "Cookie");
-  const path = ctx.params?.path as string[];
-  const settings = config();
-  const isAdmin = path[0] === settings.adminPath;
-  if (!isAdmin && (path.length !== 1 || !validSlug(path[0])))
-    return { notFound: true };
+  ctx.res.setHeader("Cache-Control", "private, no-store");
+  const path = ctx.params?.path as string[],
+    settings = config();
+  if (path.length === 1 && validSlug(path[0])) {
+    const fn = await publicFunction(path[0]);
+    return fn
+      ? { props: { mode: "public", publicFn: serial<PublicFn>(fn) } }
+      : { notFound: true };
+  }
   if (
-    isAdmin &&
+    path[0] !== settings.adminPath ||
     !(
       path.length === 1 ||
       (path.length === 2 && path[1] === "audit") ||
-      (path[1] === "users" &&
-        validUuid(path[2] ?? "") &&
-        (path.length === 3 ||
-          (path.length === 5 && path[3] === "entries" && validUuid(path[4]))))
+      (path.length === 3 && path[1] === "functions" && validUuid(path[2]))
     )
   )
     return { notFound: true };
   const auth = await currentSession(ctx.req);
-  if (!auth) {
-    if (isAdmin && path.length > 1)
-      return {
-        redirect: { destination: `/${settings.adminPath}`, permanent: false },
-      };
-    return {
-      props: {
-        mode: "login",
-        csrf: anonymousCsrf(ctx.req, ctx.res),
-        destination: `/${path[0]}`,
-      },
-    };
-  }
+  if (!auth)
+    return { props: { mode: "login", csrf: anonymousCsrf(ctx.req, ctx.res) } };
   const base = {
     csrf: auth.session.csrfToken,
-    destination: `/${path.join("/")}`,
-    username: auth.user.username,
-  };
-  if (!isAdmin) {
-    const entry = await ownedEntry(auth.user.id, path[0]);
-    return entry
-      ? { props: { ...base, mode: "entry", entry: serial<Entry>(entry) } }
-      : { notFound: true };
-  }
-  if (auth.user.role !== "admin") return { notFound: true };
-  const created =
-    typeof ctx.query.created === "string" &&
-    ctx.query.created.startsWith(`${settings.origin}/def`) &&
-    validSlug(ctx.query.created.slice(settings.origin.length + 1))
-      ? ctx.query.created
-      : undefined;
-  const admin = {
-    ...base,
     adminPath: settings.adminPath,
     origin: settings.origin,
-    ...(created ? { created } : {}),
   };
-  if (path.length === 1) {
-    const list = await db
-      .select({
-        id: users.id,
-        username: users.username,
-        isActive: users.isActive,
-        createdAt: users.createdAt,
-      })
-      .from(users)
-      .where(eq(users.role, "user"))
-      .orderBy(users.username);
-    return { props: { ...admin, mode: "users", users: serial<User[]>(list) } };
-  }
-  if (path[1] === "audit") {
+  if (path[1] === "audit")
     return {
       props: {
-        ...admin,
+        ...base,
         mode: "audit",
-        audit: serial<Audit[]>(
+        audit: serial(
           await db
             .select()
             .from(auditLogs)
@@ -131,89 +83,50 @@ export const getServerSideProps: GetServerSideProps<Props> = async (ctx) => {
         ),
       },
     };
-  }
-  const [owner] = await db
-    .select({
-      id: users.id,
-      username: users.username,
-      isActive: users.isActive,
-      createdAt: users.createdAt,
-    })
-    .from(users)
-    .where(eq(users.id, path[2]));
-  if (!owner) return { notFound: true };
-  if (path.length === 5) {
-    const [entry] = await db
-      .select()
-      .from(entries)
-      .where(eq(entries.id, path[4]));
-    if (!entry || entry.userId !== owner.id) return { notFound: true };
+  const list = await db.select().from(profiles).orderBy(profiles.name);
+  if (path.length === 1)
     return {
       props: {
-        ...admin,
-        mode: "edit",
-        user: serial<User>(owner),
-        entry: serial<Entry>(entry),
+        ...base,
+        mode: "dashboard",
+        profiles: serial(list),
+        functions: serial(
+          await db.select().from(functions).orderBy(functions.defNumber),
+        ),
       },
     };
-  }
-  const list = await db
-    .select({
-      id: entries.id,
-      slug: entries.slug,
-      title: entries.title,
-      isActive: entries.isActive,
-      createdAt: entries.createdAt,
-      expiresAt: entries.expiresAt,
-    })
-    .from(entries)
-    .where(eq(entries.userId, owner.id))
-    .orderBy(entries.defNumber);
+  const [fn] = await db
+    .select()
+    .from(functions)
+    .where(eq(functions.id, path[2]));
+  if (!fn) return { notFound: true };
   return {
     props: {
-      ...admin,
-      mode: "user",
-      user: serial<User>(owner),
-      entries: serial<Entry[]>(list),
+      ...base,
+      mode: "function",
+      fn: serial(fn),
+      profiles: serial(list),
+      variants: serial(
+        await db.select().from(variants).where(eq(variants.functionId, fn.id)),
+      ),
     },
   };
 };
-const date = (value: string) => new Date(value).toLocaleString();
 export default function Page(p: Props) {
   const [busy, setBusy] = useState(false),
-    [error, setError] = useState(""),
-    [notice, setNotice] = useState(
-      p.created ? "Created successfully. URL: " + p.created : "",
-    ),
-    [wrap, setWrap] = useState(true),
-    [copied, setCopied] = useState(false);
-  async function action(
-    action: string,
-    data: Record<string, unknown> = {},
-    reload = true,
-  ) {
+    [error, setError] = useState("");
+  async function action(action: string, data: Record<string, unknown> = {}) {
     setBusy(true);
     setError("");
-    setNotice("");
     try {
-      const response = await fetch("/api/action", {
+      const r = await fetch("/api/action", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ action, csrf: p.csrf, ...data }),
       });
-      const result = await response.json();
-      if (!response.ok) throw new Error(result.error ?? "Request failed");
-      if (result.redirect) {
-        window.location.assign(result.redirect);
-        return;
-      }
-      if (reload) {
-        const url = new URL(window.location.href);
-        if (result.url) url.searchParams.set("created", result.url);
-        window.location.assign(url.pathname + url.search);
-        return;
-      }
-      setNotice(result.message ?? "Saved");
+      const result = await r.json();
+      if (!r.ok) throw new Error(result.error ?? "Request failed");
+      window.location.assign(result.redirect ?? window.location.pathname);
     } catch (e) {
       setError(e instanceof Error ? e.message : "Request failed");
     } finally {
@@ -221,52 +134,62 @@ export default function Page(p: Props) {
     }
   }
   function form(
-    event: FormEvent<HTMLFormElement>,
-    name: string,
+    e: FormEvent<HTMLFormElement>,
+    actionName: string,
     extra: Record<string, unknown> = {},
   ) {
-    event.preventDefault();
-    const values = Object.fromEntries(new FormData(event.currentTarget));
-    const expires = values.expiresAt;
-    if ("expiresAt" in values)
-      return void action(name, {
-        ...values,
-        expiresAt: expires ? new Date(`${expires}Z`).toISOString() : null,
-        ...extra,
-      });
-    void action(name, { ...values, ...extra });
+    e.preventDefault();
+    const data: Record<string, unknown> = Object.fromEntries(
+      new FormData(e.currentTarget),
+    );
+    if ("expiresAt" in data)
+      data.expiresAt = data.expiresAt
+        ? new Date(String(data.expiresAt) + "Z").toISOString()
+        : null;
+    void action(actionName, { ...data, ...extra });
   }
-  const logout = (
-    <button
-      className="secondary"
-      disabled={busy}
-      onClick={() => action("logout")}
-    >
-      Logout
-    </button>
-  );
+  const remove = (
+    message: string,
+    name: string,
+    data: Record<string, unknown>,
+  ) => {
+    if (confirm(message)) void action(name, data);
+  };
+  if (p.mode === "public")
+    return (
+      <>
+        <Head>
+          <title>{p.publicFn!.title}</title>
+          <meta name="robots" content="noindex,nofollow" />
+        </Head>
+        <main>
+          <h1>{p.publicFn!.title}</h1>
+          <p className="muted">{p.publicFn!.slug}</p>
+          {p.publicFn!.variants.map((v) => (
+            <details className="card accordion" key={v.id}>
+              <summary>{v.name}</summary>
+              <Code content={v.content} />
+              <p className="muted">
+                Updated {new Date(v.updatedAt).toLocaleString()}
+              </p>
+            </details>
+          ))}
+          {!p.publicFn!.variants.length && (
+            <p className="muted">No variants available.</p>
+          )}
+        </main>
+      </>
+    );
   if (p.mode === "login")
     return (
       <>
         <Head>
-          <title>Sign In</title>
-          <meta name="robots" content="noindex,nofollow" />
+          <title>Administration</title>
         </Head>
         <main className="login">
-          <div className="card">
-            <h1>Sign In</h1>
-            <form
-              onSubmit={(e) => form(e, "login", { destination: p.destination })}
-            >
-              <label>
-                <span>Login</span>
-                <input
-                  name="username"
-                  autoComplete="username"
-                  maxLength={64}
-                  required
-                />
-              </label>
+          <section className="card">
+            <h1>Administration</h1>
+            <form onSubmit={(e) => form(e, "login")}>
               <label>
                 <span>Password</span>
                 <input
@@ -282,285 +205,243 @@ export default function Page(p: Props) {
                   {error}
                 </p>
               )}
-              <button disabled={busy}>
-                {busy ? "Signing in…" : "Sign In"}
-              </button>
+              <button disabled={busy}>Sign In</button>
             </form>
-          </div>
+          </section>
         </main>
       </>
     );
   return (
     <>
       <Head>
-        <title>
-          {p.mode === "entry"
-            ? (p.entry?.title ?? p.entry?.slug)
-            : "Administration"}
-        </title>
+        <title>Administration</title>
         <meta name="robots" content="noindex,nofollow" />
       </Head>
       <main>
         <header className="row spread">
-          <div>
-            <h1>
-              {p.mode === "entry"
-                ? p.entry?.title || p.entry?.slug
-                : "Administration"}
-            </h1>
-            <div className="muted">{p.username}</div>
-          </div>
+          <h1>Administration</h1>
           <div className="row">
-            {p.adminPath && (
-              <>
-                <Link href={`/${p.adminPath}`}>Users</Link>
-                <Link href={`/${p.adminPath}/audit`}>Audit log</Link>
-              </>
-            )}
-            {logout}
+            <Link href={`/${p.adminPath}`}>Functions & users</Link>
+            <Link href={`/${p.adminPath}/audit`}>Audit log</Link>
+            <button disabled={busy} onClick={() => action("logout")}>
+              Logout
+            </button>
           </div>
         </header>
         {error && (
-          <p role="alert" className="error">
+          <p className="error" role="alert">
             {error}
           </p>
         )}
-        {notice && <p className="notice">{notice}</p>}
-        {p.mode === "entry" && p.entry && (
-          <>
-            <div className="row" style={{ marginTop: 24 }}>
-              <code>{p.entry.slug}</code>
-              <span className="muted">Created {date(p.entry.createdAt)}</span>
-              <button
-                disabled={busy}
-                onClick={async () => {
-                  try {
-                    await navigator.clipboard.writeText(p.entry!.content ?? "");
-                    setCopied(true);
-                  } catch {
-                    setError(
-                      "Clipboard unavailable. Select and copy the text manually.",
-                    );
-                  }
-                }}
-              >
-                {copied ? "Copied" : "Copy"}
-              </button>
-              <label>
-                <input
-                  className="checkbox"
-                  type="checkbox"
-                  checked={wrap}
-                  onChange={(e) => setWrap(e.target.checked)}
-                />
-                Word wrap
-              </label>
-            </div>
-            <pre className={wrap ? "wrap" : ""}>{p.entry.content}</pre>
-          </>
-        )}
-        {p.mode === "users" && (
+        {p.mode === "dashboard" && (
           <>
             <section className="card">
-              <h2>Create user</h2>
-              <form onSubmit={(e) => form(e, "createUser")}>
+              <h2>Create function</h2>
+              <form onSubmit={(e) => form(e, "createFunction")}>
                 <label>
-                  <span>Login</span>
-                  <input
-                    name="username"
-                    pattern="[a-zA-Z0-9_.\-]{3,64}"
-                    required
-                    minLength={3}
-                    maxLength={64}
-                  />
+                  <span>Title</span>
+                  <input name="title" required maxLength={200} />
                 </label>
-                <label>
-                  <span>Password (12–72 bytes)</span>
-                  <input
-                    name="password"
-                    type="password"
-                    required
-                    minLength={12}
-                    autoComplete="new-password"
-                  />
-                </label>
-                <button disabled={busy}>Create user</button>
+                <button disabled={busy}>Create</button>
               </form>
+              <h2>Functions</h2>
+              {p.functions!.map((f) => (
+                <p key={f.id}>
+                  <Link href={`/${p.adminPath}/functions/${f.id}`}>
+                    {f.slug} — {f.title}
+                  </Link>{" "}
+                  {!f.isActive && " (Disabled)"}
+                </p>
+              ))}
             </section>
-            <section className="card table-scroll">
-              <table>
-                <thead>
-                  <tr>
-                    <th>User</th>
-                    <th>Status</th>
-                    <th>Created</th>
-                  </tr>
-                </thead>
-                <tbody>
-                  {p.users?.map((u) => (
-                    <tr key={u.id}>
-                      <td>
-                        <Link href={`/${p.adminPath}/users/${u.id}`}>
-                          {u.username}
-                        </Link>
-                      </td>
-                      <td>{u.isActive ? "Active" : "Blocked"}</td>
-                      <td>{date(u.createdAt)}</td>
-                    </tr>
-                  ))}
-                </tbody>
-              </table>
-              {!p.users?.length && <p className="muted">No users yet.</p>}
+            <section className="card">
+              <h2>Add user</h2>
+              <form onSubmit={(e) => form(e, "createProfile")}>
+                <label>
+                  <span>Name</span>
+                  <input name="name" required maxLength={64} />
+                </label>
+                <button disabled={busy}>Add user</button>
+              </form>
+              <h2>Users</h2>
+              <p className="muted">Names only. No logins or passwords.</p>
+              {p.profiles!.map((u) => (
+                <details className="card accordion" key={u.id}>
+                  <summary>
+                    {u.name}
+                    {!u.isActive && " (Hidden)"}
+                  </summary>
+                  <form
+                    onSubmit={(e) =>
+                      form(e, "renameProfile", { profileId: u.id })
+                    }
+                  >
+                    <label>
+                      <span>Name</span>
+                      <input
+                        name="name"
+                        defaultValue={u.name}
+                        required
+                        maxLength={64}
+                      />
+                    </label>
+                    <button disabled={busy}>Rename</button>
+                  </form>
+                  <div className="row" style={{ marginTop: 12 }}>
+                    <button
+                      disabled={busy}
+                      onClick={() =>
+                        action("toggleProfile", { profileId: u.id })
+                      }
+                    >
+                      {u.isActive ? "Hide everywhere" : "Show"}
+                    </button>
+                    <button
+                      disabled={busy}
+                      className="danger"
+                      onClick={() =>
+                        remove(
+                          "Delete user and all their code variants?",
+                          "deleteProfile",
+                          { profileId: u.id },
+                        )
+                      }
+                    >
+                      Delete
+                    </button>
+                  </div>
+                </details>
+              ))}
             </section>
           </>
         )}
-        {p.mode === "user" && p.user && (
+        {p.mode === "function" && p.fn && (
           <>
             <section className="card">
-              <h2>User: {p.user.username}</h2>
-              <div className="row">
-                <span>{p.user.isActive ? "Active" : "Blocked"}</span>
+              <h2>{p.fn.slug}</h2>
+              <p>
+                <a href={`/${p.fn.slug}`} target="_blank" rel="noreferrer">
+                  {p.origin}/{p.fn.slug}
+                </a>
+              </p>
+              <form
+                onSubmit={(e) =>
+                  form(e, "updateFunction", { functionId: p.fn!.id })
+                }
+              >
+                <label>
+                  <span>Title</span>
+                  <input
+                    name="title"
+                    defaultValue={p.fn.title}
+                    required
+                    maxLength={200}
+                  />
+                </label>
+                <button disabled={busy}>Save title</button>
+              </form>
+              <div className="row" style={{ marginTop: 12 }}>
                 <button
                   disabled={busy}
-                  onClick={() => action("toggleUser", { userId: p.user!.id })}
+                  onClick={() =>
+                    action("toggleFunction", { functionId: p.fn!.id })
+                  }
                 >
-                  {p.user.isActive ? "Block" : "Unblock"}
+                  {p.fn.isActive ? "Disable function" : "Enable function"}
                 </button>
                 <button
                   className="danger"
                   disabled={busy}
-                  onClick={() => {
-                    if (
-                      confirm(
-                        "Delete this user and all their entries permanently?",
-                      )
+                  onClick={() =>
+                    remove(
+                      "Delete function and all its variants?",
+                      "deleteFunction",
+                      { functionId: p.fn!.id },
                     )
-                      void action("deleteUser", { userId: p.user!.id });
-                  }}
+                  }
                 >
-                  Delete user
+                  Delete function
                 </button>
               </div>
-              <form
-                onSubmit={(e) =>
-                  form(e, "changePassword", { userId: p.user!.id })
-                }
-              >
-                <label>
-                  <span>New password</span>
-                  <input
-                    name="password"
-                    type="password"
-                    required
-                    minLength={12}
-                    autoComplete="new-password"
-                  />
-                </label>
-                <button disabled={busy}>Change password</button>
-              </form>
             </section>
             <section className="card">
-              <h2>Add Text</h2>
-              <EntryFields
-                onSubmit={(e) => form(e, "createEntry", { userId: p.user!.id })}
-                busy={busy}
-              />
+              <h2>Add variant</h2>
+              {p.profiles!.some(
+                (u) => !p.variants!.some((v) => v.profileId === u.id),
+              ) ? (
+                <form
+                  onSubmit={(e) =>
+                    form(e, "saveVariant", { functionId: p.fn!.id })
+                  }
+                >
+                  <label>
+                    <span>User</span>
+                    <select name="profileId" required>
+                      {p
+                        .profiles!.filter(
+                          (u) => !p.variants!.some((v) => v.profileId === u.id),
+                        )
+                        .map((u) => (
+                          <option key={u.id} value={u.id}>
+                            {u.name}
+                          </option>
+                        ))}
+                    </select>
+                  </label>
+                  <VariantFields />
+                  <button disabled={busy}>Save variant</button>
+                </form>
+              ) : (
+                <p className="muted">
+                  Add another user in the administration dashboard to create a
+                  new variant.
+                </p>
+              )}
             </section>
-            <section className="card table-scroll">
-              <h2>Entries</h2>
-              <table>
-                <thead>
-                  <tr>
-                    <th>Slug / URL</th>
-                    <th>Title</th>
-                    <th>Status</th>
-                    <th>Actions</th>
-                  </tr>
-                </thead>
-                <tbody>
-                  {p.entries?.map((e) => (
-                    <tr key={e.id}>
-                      <td>
-                        <code>{e.slug}</code>
-                        <div className="muted">
-                          {p.origin}/{e.slug}
-                        </div>
-                      </td>
-                      <td>
-                        {e.title}
-                        <div className="muted">{date(e.createdAt)}</div>
-                      </td>
-                      <td>
-                        {!e.isActive
-                          ? "Disabled"
-                          : e.expiresAt && new Date(e.expiresAt) < new Date()
-                            ? "Expired"
-                            : "Active"}
-                      </td>
-                      <td>
-                        <div className="row">
-                          <Link
-                            href={`/${p.adminPath}/users/${p.user!.id}/entries/${e.id}`}
-                          >
-                            Edit
-                          </Link>
-                          <button
-                            disabled={busy}
-                            onClick={() =>
-                              action("toggleEntry", {
-                                userId: p.user!.id,
-                                entryId: e.id,
-                              })
-                            }
-                          >
-                            {e.isActive ? "Disable" : "Enable"}
-                          </button>
-                          <button
-                            className="danger"
-                            disabled={busy}
-                            onClick={() => {
-                              if (confirm(`Delete ${e.slug} permanently?`))
-                                void action("deleteEntry", {
-                                  userId: p.user!.id,
-                                  entryId: e.id,
-                                });
-                            }}
-                          >
-                            Delete
-                          </button>
-                        </div>
-                      </td>
-                    </tr>
-                  ))}
-                </tbody>
-              </table>
-            </section>
+            <h2>Variants</h2>
+            {p.variants!.map((v) => (
+              <details className="card accordion" key={v.id}>
+                <summary>
+                  {p.profiles!.find((u) => u.id === v.profileId)?.name}
+                  {!v.isActive
+                    ? " (Disabled)"
+                    : v.expiresAt && new Date(v.expiresAt) <= new Date()
+                      ? " (Expired)"
+                      : ""}
+                </summary>
+                <form
+                  onSubmit={(e) =>
+                    form(e, "saveVariant", {
+                      functionId: p.fn!.id,
+                      profileId: v.profileId,
+                    })
+                  }
+                >
+                  <VariantFields variant={v} />
+                  <button disabled={busy}>Save code</button>
+                </form>
+                <div className="row" style={{ marginTop: 12 }}>
+                  <button
+                    disabled={busy}
+                    onClick={() => action("toggleVariant", { variantId: v.id })}
+                  >
+                    {v.isActive ? "Hide variant" : "Show variant"}
+                  </button>
+                  <button
+                    className="danger"
+                    disabled={busy}
+                    onClick={() =>
+                      remove("Delete this variant?", "deleteVariant", {
+                        variantId: v.id,
+                      })
+                    }
+                  >
+                    Delete variant
+                  </button>
+                </div>
+              </details>
+            ))}
           </>
-        )}
-        {p.mode === "edit" && p.entry && p.user && (
-          <section className="card">
-            <h2>
-              Edit {p.user.username} / {p.entry.slug}
-            </h2>
-            <p className="muted">
-              {p.origin}/{p.entry.slug}
-            </p>
-            <EntryFields
-              entry={p.entry}
-              busy={busy}
-              onSubmit={(e) =>
-                form(e, "updateEntry", {
-                  userId: p.user!.id,
-                  entryId: p.entry!.id,
-                })
-              }
-            />
-            <p>
-              <Link href={`/${p.adminPath}/users/${p.user.id}`}>
-                Back to user
-              </Link>
-            </p>
-          </section>
         )}
         {p.mode === "audit" && (
           <section className="card table-scroll">
@@ -570,25 +451,17 @@ export default function Page(p: Props) {
                 <tr>
                   <th>Time</th>
                   <th>Action</th>
-                  <th>Admin</th>
-                  <th>User</th>
-                  <th>Entry</th>
+                  <th>User ID</th>
+                  <th>Function ID</th>
                 </tr>
               </thead>
               <tbody>
-                {p.audit?.map((a) => (
+                {p.audit!.map((a) => (
                   <tr key={a.id}>
-                    <td>{date(a.createdAt)}</td>
+                    <td>{new Date(a.createdAt).toLocaleString()}</td>
                     <td>{a.action}</td>
-                    <td>
-                      <code>{a.adminId}</code>
-                    </td>
-                    <td>
-                      <code>{a.targetUserId}</code>
-                    </td>
-                    <td>
-                      <code>{a.targetEntryId}</code>
-                    </td>
+                    <td>{a.targetUserId}</td>
+                    <td>{a.targetFunctionId}</td>
                   </tr>
                 ))}
               </tbody>
@@ -599,28 +472,16 @@ export default function Page(p: Props) {
     </>
   );
 }
-function EntryFields({
-  entry,
-  busy,
-  onSubmit,
-}: {
-  entry?: Entry;
-  busy: boolean;
-  onSubmit: (e: FormEvent<HTMLFormElement>) => void;
-}) {
+function VariantFields({ variant }: { variant?: Variant }) {
   return (
-    <form onSubmit={onSubmit}>
+    <>
       <label>
-        <span>Title</span>
-        <input name="title" defaultValue={entry?.title ?? ""} maxLength={200} />
-      </label>
-      <label>
-        <span>Content</span>
+        <span>Code</span>
         <textarea
           name="content"
-          defaultValue={entry?.content ?? ""}
           required
           maxLength={1000000}
+          defaultValue={variant?.content ?? ""}
           spellCheck={false}
         />
       </label>
@@ -629,10 +490,43 @@ function EntryFields({
         <input
           name="expiresAt"
           type="datetime-local"
-          defaultValue={entry?.expiresAt?.slice(0, 16) ?? ""}
+          defaultValue={variant?.expiresAt?.slice(0, 16) ?? ""}
         />
       </label>
-      <button disabled={busy}>{entry ? "Save changes" : "Create"}</button>
-    </form>
+    </>
+  );
+}
+function Code({ content }: { content: string }) {
+  const [wrap, setWrap] = useState(true),
+    [copied, setCopied] = useState(false),
+    [error, setError] = useState("");
+  return (
+    <>
+      <div className="row" style={{ marginTop: 16 }}>
+        <button
+          onClick={async () => {
+            try {
+              await navigator.clipboard.writeText(content);
+              setCopied(true);
+            } catch {
+              setError("Select and copy the text manually.");
+            }
+          }}
+        >
+          {copied ? "Copied" : "Copy"}
+        </button>
+        <label>
+          <input
+            type="checkbox"
+            className="checkbox"
+            checked={wrap}
+            onChange={(e) => setWrap(e.target.checked)}
+          />
+          Word wrap
+        </label>
+      </div>
+      {error && <p className="muted">{error}</p>}
+      <pre className={wrap ? "wrap" : ""}>{content}</pre>
+    </>
   );
 }

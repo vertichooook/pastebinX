@@ -16,7 +16,6 @@ cat > .env <<EOF
 POSTGRES_PASSWORD=$db_password
 DATABASE_URL=postgresql://paste:$db_password@db:5432/paste
 SESSION_SECRET=$session_secret
-ADMIN_USERNAME=administrator
 ADMIN_PASSWORD=$admin_password
 ADMIN_PATH=$admin_path
 APP_URL=${app_url%/}
@@ -25,6 +24,5 @@ TRUST_PROXY=true
 EOF
 echo "Created .env with random secrets."
 echo "Administrator URL: ${app_url%/}/$admin_path"
-echo 'Administrator login: administrator'
 echo "Administrator password: $admin_password"
 echo 'Save these credentials in your password manager.'
