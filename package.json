@@ -1,0 +1,41 @@
+{
+  "name": "private-paste",
+  "version": "1.0.0",
+  "private": true,
+  "scripts": {
+    "dev": "next dev",
+    "build": "next build",
+    "start": "next start -H 0.0.0.0",
+    "typecheck": "tsc --noEmit",
+    "db:migrate": "tsx --env-file-if-exists=.env scripts/migrate.ts",
+    "db:seed": "tsx --env-file-if-exists=.env scripts/seed.ts",
+    "test": "tsx --test tests/*.test.ts",
+    "db:cleanup": "tsx --env-file-if-exists=.env scripts/cleanup.ts",
+    "admin:password": "tsx --env-file-if-exists=.env scripts/admin-password.ts"
+  },
+  "dependencies": {
+    "bcryptjs": "^3.0.2",
+    "drizzle-orm": "^0.44.0",
+    "next": "^16.0.0",
+    "pg": "^8.16.0",
+    "react": "^19.2.0",
+    "react-dom": "^19.2.0",
+    "tsx": "^4.20.0",
+    "zod": "^4.1.0"
+  },
+  "devDependencies": {
+    "@electric-sql/pglite": "^0.5.8",
+    "@electric-sql/pglite-socket": "^0.2.11",
+    "@tailwindcss/postcss": "^4.1.0",
+    "@types/node": "^24.0.0",
+    "@types/pg": "^8.15.0",
+    "@types/react": "^19.2.0",
+    "@types/react-dom": "^19.2.0",
+    "embedded-postgres": "17.10.0-beta.17",
+    "prettier": "^3.9.9",
+    "tailwindcss": "^4.1.0",
+    "typescript": "^5.9.0"
+  },
+  "type": "module",
+  "packageManager": "pnpm@11.19.0"
+}
