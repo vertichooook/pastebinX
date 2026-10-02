@@ -17,3 +17,22 @@ jobs:
       - run: pnpm build
       - run: pnpm test
       - run: docker build -t private-paste:verify .
+      - name: Verify Compose startup and automatic bootstrap
+        run: |
+          bash scripts/configure-env.sh https://test.example.com > /dev/null
+          docker compose up -d --build
+          for attempt in $(seq 1 60); do
+            if [ "$(curl -s -o /dev/null -w '%{http_code}' http://127.0.0.1:3000/)" = '404' ]; then
+              break
+            fi
+            sleep 2
+          done
+          if [ "$(curl -s -o /dev/null -w '%{http_code}' http://127.0.0.1:3000/)" != '404' ]; then
+            docker compose logs --tail=80 app
+            exit 1
+          fi
+          docker compose exec -T app node -e "fetch('http://127.0.0.1:3000/def1').then(async r=>{if(r.status!==200 || !(await r.text()).includes('Sign In')) process.exit(1)}).catch(()=>process.exit(1))"
+      - name: Stop containers
+        if: always()
+        run: |
+          if [ -f .env ]; then docker compose down; fi

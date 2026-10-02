@@ -9,8 +9,8 @@ RUN pnpm prune --prod
 
 FROM node:24-alpine AS runtime
 WORKDIR /app
-ENV NODE_ENV=production NEXT_TELEMETRY_DISABLED=1
-RUN corepack enable && addgroup -S paste && adduser -S paste -G paste
+ENV NODE_ENV=production NEXT_TELEMETRY_DISABLED=1 COREPACK_HOME=/opt/corepack
+RUN corepack enable && corepack prepare pnpm@11.19.0 --activate && addgroup -S paste && adduser -S paste -G paste
 COPY --from=build --chown=paste:paste /app /app
 USER paste
 EXPOSE 3000
